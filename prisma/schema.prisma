@@ -14,6 +14,8 @@ datasource db {
   // We are using PostgreSQL (Neon cloud database).
   provider = "postgresql"
 
+  // Needed so `prisma db push` / `prisma studio` can connect (runtime uses the adapter).
+  url      = env("DATABASE_URL")
 }
 
 
