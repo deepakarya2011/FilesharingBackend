@@ -1,0 +1,96 @@
+// Prisma schema file.
+// This defines the shape of our database tables.
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  // Generate a standard CommonJS Prisma client for Node.js.
+  provider = "prisma-client-js"
+
+  // Output the generated client to this folder.
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  // We are using PostgreSQL (Neon cloud database).
+  provider = "postgresql"
+
+}
+
+
+// ================================
+// SHARE MODEL
+// ================================
+// Represents one file-sharing session.
+// The backend stores ONLY session metadata here.
+// Actual file data is NEVER stored in the database.
+
+model Share {
+
+  // Auto-incrementing primary key.
+  id            Int      @id @default(autoincrement())
+
+  // The 6-digit code the receiver enters.
+  // Must be unique across all shares.
+  code          String   @unique
+
+  // Current state of the share session.
+  // Possible values: "waiting" | "connected" | "completed" | "expired"
+  status        String   @default("waiting")
+
+  // Socket.IO ID of the sender's browser connection.
+  // Null until the sender connects via WebSocket.
+  senderPeerId  String?
+
+  // Socket.IO ID of the receiver's browser connection.
+  // Null until the receiver joins via WebSocket.
+  receiverPeerId String?
+
+  // WebRTC SDP offer — created by sender, stored temporarily for receiver to read.
+  // Null until sender creates the offer.
+  offer         String?
+
+  // WebRTC SDP answer — created by receiver, stored temporarily for sender to read.
+  // Null until receiver creates the answer.
+  answer        String?
+
+  // When this share session expires and becomes invalid.
+  expiresAt     DateTime
+
+  // When this share was created.
+  createdAt     DateTime @default(now())
+
+  // One share can have multiple file metadata records.
+  files         File[]
+}
+
+
+// ================================
+// FILE MODEL
+// ================================
+// Stores ONLY metadata about files being transferred.
+// NO file binary, NO blob, NO base64, NO storageKey.
+// The actual file bytes travel browser-to-browser via WebRTC DataChannel.
+
+model File {
+
+  // Auto-incrementing primary key.
+  id        Int      @id @default(autoincrement())
+
+  // Original name of the file (e.g. "photo.png").
+  fileName  String
+
+  // File size in bytes (e.g. 2048000 for ~2MB).
+  fileSize  Int
+
+  // MIME type of the file (e.g. "image/png", "video/mp4").
+  mimeType  String
+
+  // When this file metadata record was created.
+  createdAt DateTime @default(now())
+
+  // Foreign key — which share session this file belongs to.
+  shareId   Int
+
+  // Relation to the Share model.
+  share     Share    @relation(fields: [shareId], references: [id])
+}
