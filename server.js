@@ -31,10 +31,32 @@ const app = express();
 // sirf Express app nahi.
 const server = http.createServer(app);
 
+// ================================
+// CORS CONFIGURATION
+// ================================
+
+// FRONTEND_URL env var mein comma-separated list ho sakti hai, e.g.
+//   "https://mysharedrop.vercel.app,http://localhost:5173"
+// Har origin ke aage/peeche ki whitespace aur trailing slash hata dete hain
+// taaki "https://mysharedrop.vercel.app/" aur "...vercel.app" dono match ho.
+const allowedOrigins = (process.env.FRONTEND_URL || "")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+
+// Origin check callback — Express cors() aur Socket.IO dono ke liye common.
+// origin undefined = non-browser request (curl, Render healthcheck) — allow.
+const checkOrigin = (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+    }
+    return callback(new Error(`Origin ${origin} not allowed by CORS`));
+};
+
 // Socket.IO server banao aur http server se attach karo.
 // cors option se frontend URL ko WebSocket connections ki permission milti hai.
 const io = new Server(server, {
-    cors: { origin: process.env.FRONTEND_URL }
+    cors: { origin: checkOrigin }
 });
 
 
@@ -42,8 +64,8 @@ const io = new Server(server, {
 // MIDDLEWARE
 // ================================
 
-// Sirf FRONTEND_URL se aane wali HTTP requests allow karo.
-app.use(cors({ origin: process.env.FRONTEND_URL }));
+// Sirf FRONTEND_URL list mein aane wali HTTP requests allow karo.
+app.use(cors({ origin: checkOrigin }));
 
 // Incoming JSON request bodies parse karo (e.g. { code: "123456" }).
 app.use(express.json());
