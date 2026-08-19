@@ -176,16 +176,26 @@ app.get("/", (req, res) => res.send("FileShare Backend Running"));
 //  - /           → server up/down
 //  - /api/health → server + database connection
 app.get("/api/health", async (req, res) => {
+    // Diagnosis ke liye — DATABASE_URL set hai ya nahi (secret kabhi expose nahi hota).
+    const dbUrl = process.env.DATABASE_URL || "";
+    const hostMatch = dbUrl.match(/@([^:/?#]+)/);
+    const dbInfo = {
+        urlSet: Boolean(dbUrl),
+        urlLength: dbUrl.length,
+        host: hostMatch ? hostMatch[1] : null
+    };
+
     try {
         await prisma.$queryRaw`SELECT 1`;
-        res.json({ status: "ok", db: "connected" });
+        res.json({ status: "ok", connected: true, db: dbInfo });
     } catch (error) {
         console.error("Health check DB error:", error);
         res.status(500).json({
             status: "error",
-            db: "disconnected",
+            connected: false,
             message: error.message,
-            code: error.code || null
+            code: error.code || null,
+            db: dbInfo
         });
     }
 });
