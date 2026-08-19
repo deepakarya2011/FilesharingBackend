@@ -46,8 +46,36 @@ const allowedOrigins = (process.env.FRONTEND_URL || "")
 
 // Origin check callback — Express cors() aur Socket.IO dono ke liye common.
 // origin undefined = non-browser request (curl, Render healthcheck) — allow.
+//
+// Vercel par app ko multiple URLs milte hain:
+//   - Production:      https://mysharedrop.vercel.app
+//   - Deployment:      https://mysharedrop-<hash>.vercel.app
+//   - Git branch:      https://sharedrop-git-main-deepakarya2011s-projects.vercel.app
+// Sab *.vercel.app subdomains end me ".vercel.app" se khatam hote hain,
+// isliye hum kisi bhi Vercel origin ko allow kar dete hain — production,
+// preview aur deployment URLs sab pe CORS aaram se kaam karega.
+const isAllowedOrigin = (origin) => {
+    if (!origin) return true;
+
+    // Exact match — user ne FRONTEND_URL mein jo likha hai.
+    if (allowedOrigins.includes(origin)) return true;
+
+    try {
+        const hostname = new URL(origin).hostname;
+        // Vercel ke saare URLs (production, preview, deployment).
+        if (hostname.endsWith(".vercel.app")) return true;
+        // Local development (kisi bhi port se).
+        if (hostname === "localhost" || hostname === "127.0.0.1") return true;
+    } catch {
+        // Invalid URL — allow nahi karte.
+        return false;
+    }
+
+    return false;
+};
+
 const checkOrigin = (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (isAllowedOrigin(origin)) {
         return callback(null, true);
     }
     return callback(new Error(`Origin ${origin} not allowed by CORS`));
