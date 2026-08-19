@@ -2,17 +2,18 @@ services:
   - type: web
     name: fileshare-backend
     runtime: node
-    buildCommand: npm install && npm run build
+    buildCommand: npm install && npm run build && npx prisma db push
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
-      # DATABASE_URL — Render dashboard se set karo (Neon PostgreSQL connection string).
       - key: DATABASE_URL
         sync: false
-      # FRONTEND_URL — Vercel production URL (comma-separated list allowed).
-      # e.g. https://mysharedrop.vercel.app
-      # NOTE: Deployment/preview URLs (sharedrop-git-main-...vercel.app) use MAT KARO —
-      # sirf asli production URL (mysharedrop.vercel.app) set karo.
       - key: FRONTEND_URL
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
         sync: false

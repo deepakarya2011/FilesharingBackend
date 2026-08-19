@@ -22,7 +22,7 @@ datasource db {
 // ================================
 // Represents one file-sharing session.
 // The backend stores ONLY session metadata here.
-// Actual file data is NEVER stored in the database.
+// Actual file data is stored on Cloudinary (NOT in the database).
 
 model Share {
 
@@ -34,24 +34,8 @@ model Share {
   code          String   @unique
 
   // Current state of the share session.
-  // Possible values: "waiting" | "connected" | "completed" | "expired"
+  // Possible values: "waiting" | "uploaded" | "completed" | "expired"
   status        String   @default("waiting")
-
-  // Socket.IO ID of the sender's browser connection.
-  // Null until the sender connects via WebSocket.
-  senderPeerId  String?
-
-  // Socket.IO ID of the receiver's browser connection.
-  // Null until the receiver joins via WebSocket.
-  receiverPeerId String?
-
-  // WebRTC SDP offer — created by sender, stored temporarily for receiver to read.
-  // Null until sender creates the offer.
-  offer         String?
-
-  // WebRTC SDP answer — created by receiver, stored temporarily for sender to read.
-  // Null until receiver creates the answer.
-  answer        String?
 
   // When this share session expires and becomes invalid.
   expiresAt     DateTime
@@ -67,9 +51,8 @@ model Share {
 // ================================
 // FILE MODEL
 // ================================
-// Stores ONLY metadata about files being transferred.
-// NO file binary, NO blob, NO base64, NO storageKey.
-// The actual file bytes travel browser-to-browser via WebRTC DataChannel.
+// Stores metadata about files being transferred.
+// Actual file bytes live on Cloudinary — DB mein sirf metadata + cloudinary refs.
 
 model File {
 
@@ -84,6 +67,12 @@ model File {
 
   // MIME type of the file (e.g. "image/png", "video/mp4").
   mimeType  String
+
+  // Cloudinary ka public ID — file delete karne ke liye chahiye.
+  cloudinaryPublicId String?
+
+  // Cloudinary secure URL — receiver download karne ke liye.
+  cloudinaryUrl String?
 
   // When this file metadata record was created.
   createdAt DateTime @default(now())

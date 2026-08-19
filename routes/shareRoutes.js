@@ -1,232 +1,179 @@
-// Express import karo taaki router bana sakein.
+// Share routes — Cloudinary-based file transfer.
+// WebRTC/P2P removed: files backend se Cloudinary pe upload hote hain,
+// receiver download karta hai, aur download hone ke BAAD file turant delete hoti hai.
+
 const express = require("express");
-
-// Prisma client — Neon PostgreSQL se baat karne ke liye.
+const path = require("path");
+const fs = require("fs");
+const os = require("os");
+const crypto = require("crypto");
+const multer = require("multer");
 const prisma = require("../lib/prisma");
+const cloudinary = require("../lib/cloudinary");
 
-// Router ek mini Express app hai — related routes ka group.
-// server.js mein yeh /api/shares pe mount hoga, isliye yahan ke saare routes
-// automatically /api/shares se prefix ho jaate hain.
 const router = express.Router();
 
+// Multer — temp disk storage (memory se bacha, large files ke liye safe).
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, os.tmpdir()),
+    filename: (req, file, cb) =>
+        cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`)
+});
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+const upload = multer({ storage, limits: { fileSize: MAX_FILE_SIZE } });
 
-// ================================
-// HELPER: Generate 6-digit code
-// ================================
+// Cryptographically-secure 6-digit code.
+const generateCode = () => crypto.randomInt(100000, 999999).toString();
 
-// crypto Node.js ka built-in module hai — install karne ki zaroorat nahi.
-// Math.random() ki jagah crypto.randomInt() use karte hain kyunki yeh
-// cryptographically secure hai — predict karna mushkil hota hai.
-const crypto = require("crypto");
+// Share expired check.
+const isExpired = (share) => new Date() > new Date(share.expiresAt);
 
-const generateCode = () => {
-    // randomInt(min, max) — 100000 se 999999 ke beech ek number deta hai.
-    // Yeh guarantee karta hai ki code hamesha exactly 6 digits ka hoga.
-    return crypto.randomInt(100000, 999999).toString();
+// Upload one temp file to Cloudinary (folder: fileshare). resource_type "auto" = images/video/raw sab handle karta hai.
+const uploadToCloudinary = (filePath, originalName) =>
+    new Promise((resolve, reject) => {
+        cloudinary.uploader.upload(
+            filePath,
+            { folder: "fileshare", resource_type: "auto", use_filename: true, unique_filename: false, filename_override: originalName },
+            (error, result) => (error ? reject(error) : resolve({ publicId: result.public_id, secureUrl: result.secure_url }))
+        );
+    });
+
+// Delete ek file ko Cloudinary + DB dono se. Agar last file ho to share "completed".
+const deleteShareFile = async (fileId, shareId = null) => {
+    const where = { id: Number(fileId) };
+    if (shareId != null) where.shareId = shareId;
+    const file = await prisma.file.findFirst({ where });
+    if (!file) return false;
+    if (file.cloudinaryPublicId) {
+        try { await cloudinary.uploader.destroy(file.cloudinaryPublicId, { resource_type: "auto" }); }
+        catch (e) { console.warn("Cloudinary delete warning:", e.message); }
+    }
+    await prisma.file.delete({ where: { id: file.id } });
+    const remaining = await prisma.file.count({ where: { shareId: file.shareId } });
+    if (remaining === 0) {
+        await prisma.share.update({ where: { id: file.shareId }, data: { status: "completed" } }).catch(() => {});
+    }
+    return true;
 };
 
-
 // ================================
-// HELPER: Check expiry
+// POST /api/shares — create share
 // ================================
-
-const isExpired = (share) => {
-    // Current time ko share ki expiresAt se compare karo.
-    // Agar current time > expiresAt hai to share expire ho chuka hai.
-    return new Date() > new Date(share.expiresAt);
-};
-
-
-// ================================
-// POST /api/shares
-// ================================
-// Sender yeh route call karta hai jab "SEND FILES" button dabata hai.
-// Ek naya share session create hota hai DB mein.
-// Response mein shareId (Socket.IO room ke liye) aur code (receiver ko dikhane ke liye) milta hai.
-
 router.post("/", async (req, res) => {
-
     try {
-
-        // Cryptographically secure 6-digit code generate karo.
-        const code = generateCode();
-
-        // Share 10 minute mein expire hoga.
-        // Date.now() milliseconds mein hai, isliye 10 * 60 * 1000 = 10 minutes.
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-        // Neon PostgreSQL mein share record create karo Prisma ke zariye.
-        // status automatically "waiting" set hoga (schema mein default defined hai).
         const share = await prisma.share.create({
-            data: {
-                code,
-                expiresAt
-            }
+            data: { code: generateCode(), expiresAt: new Date(Date.now() + 60 * 60 * 1000) } // 1 hour
         });
-
-        // 201 Created response bhejo share ki details ke saath.
-        res.status(201).json({
-            success: true,
-            share: {
-                id: share.id,       // Socket.IO room join karne ke liye
-                code: share.code,   // Receiver ko dikhane ke liye
-                expiresAt: share.expiresAt
-            }
-        });
-
+        res.status(201).json({ success: true, share: { id: share.id, code: share.code, expiresAt: share.expiresAt } });
     } catch (error) {
-
         console.error("Create share error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Failed to create share."
-        });
+                res.status(500).json({ success: false, message: "Failed to create share." });
     }
 });
 
-
 // ================================
-// GET /api/shares/:code
+// POST /api/shares/:shareId/upload — upload files to Cloudinary
 // ================================
-// Receiver yeh route call karta hai jab 6-digit code enter karke "VERIFY" dabata hai.
-// Code valid hai ya nahi, expire hua ya nahi — yeh check hota hai.
-// Valid hone par shareId milta hai jo Socket.IO room join karne ke liye chahiye.
-
-router.get("/:code", async (req, res) => {
-
+router.post("/:shareId/upload", upload.array("files"), async (req, res) => {
     try {
+        const share = await prisma.share.findUnique({ where: { id: Number(req.params.shareId) } });
+        if (!share) return res.status(404).json({ success: false, message: "Share not found." });
+        if (isExpired(share)) return res.status(410).json({ success: false, message: "Share expired." });
+        if (!req.files || req.files.length === 0) return res.status(400).json({ success: false, message: "No files." });
 
-        // URL se code nikalo.
-        // e.g. GET /api/shares/482731 → req.params.code = "482731"
-        const { code } = req.params;
-
-        // Basic validation — code exactly 6 digits ka hona chahiye.
-        // Regex /^\d{6}$/ — sirf digits, exactly 6.
-        if (!/^\d{6}$/.test(code)) {
-            return res.status(400).json({
-                success: false,
-                message: "Code must be exactly 6 digits."
-            });
+        const created = [];
+        for (const file of req.files) {
+            try {
+                const { publicId, secureUrl } = await uploadToCloudinary(file.path, file.originalname);
+                const rec = await prisma.file.create({
+                    data: { fileName: file.originalname, fileSize: file.size, mimeType: file.mimetype, cloudinaryPublicId: publicId, cloudinaryUrl: secureUrl, shareId: share.id }
+                });
+                created.push({ id: rec.id, fileName: rec.fileName, fileSize: rec.fileSize, url: rec.cloudinaryUrl });
+            } catch (e) {
+                console.error("Upload failed for", file.originalname, e.message);
+            } finally {
+                fs.unlink(file.path, () => {}); // temp file hamesha delete karo
+            }
         }
 
-        // DB mein is code ka share dhundo.
-        // findUnique — unique field (code) se ek record dhundta hai.
-        const share = await prisma.share.findUnique({
-            where: { code }
-        });
+        await prisma.share.update({ where: { id: share.id }, data: { status: "uploaded" } });
+        res.json({ success: true, files: created });
+    } catch (err) {
+        console.error("Upload route error:", err);
+        res.status(500).json({ success: false, message: "Upload failed." });
+    }
+});
 
-        // Agar koi share nahi mila to 404 Not Found.
-        if (!share) {
-            return res.status(404).json({
-                success: false,
-                message: "Invalid share code."
-            });
-        }
-
-        // Agar share ki expiry time nikal gayi to 410 Gone.
+// ================================
+// GET /api/shares/verify/:code — receiver code verify
+// ================================
+router.get("/verify/:code", async (req, res) => {
+    try {
+        const share = await prisma.share.findUnique({ where: { code: req.params.code }, include: { files: true } });
+        if (!share) return res.status(404).json({ success: false, message: "Invalid code." });
         if (isExpired(share)) {
-            return res.status(410).json({
-                success: false,
-                message: "This share has expired."
-            });
+            await deleteShareFiles(share.id);
+            await prisma.share.delete({ where: { id: share.id } }).catch(() => {});
+            return res.status(410).json({ success: false, message: "Share expired." });
         }
-
-        // Agar share already use ho chuka hai to reject karo.
-        if (share.status === "completed") {
-            return res.status(410).json({
-                success: false,
-                message: "This share has already been used."
-            });
-        }
-
-        // Share valid hai — receiver ko zaruri details bhejo.
         res.json({
             success: true,
             share: {
-                id: share.id,           // Socket.IO room join karne ke liye
-                code: share.code,
-                status: share.status,
-                expiresAt: share.expiresAt
+                id: share.id, code: share.code, expiresAt: share.expiresAt, status: share.status,
+                files: share.files.map((f) => ({ id: f.id, fileName: f.fileName, fileSize: f.fileSize, url: f.cloudinaryUrl }))
             }
         });
-
-    } catch (error) {
-
-        console.error("Verify share error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Failed to verify share."
-        });
+    } catch (err) {
+        console.error("Verify error:", err);
+        res.status(500).json({ success: false, message: "Verify failed." });
     }
 });
 
-
 // ================================
-// POST /api/shares/:shareId/files
+// GET /api/shares/:shareId/status
 // ================================
-// Sender share create karne ke baad yeh route call karta hai.
-// Actual file bytes yahan nahi aate — sirf metadata (naam, size, type) save hota hai.
-// Yeh isliye kiya jaata hai taaki DB mein record rahe ki is share mein kaun si files thi.
-// Actual file data WebRTC DataChannel se directly browser-to-browser jaata hai.
-
-router.post("/:shareId/files", async (req, res) => {
-
+router.get("/:shareId/status", async (req, res) => {
     try {
-
-        // URL se shareId lo aur integer mein convert karo.
-        const shareId = parseInt(req.params.shareId);
-
-        // Request body se files array lo.
-        // Expected format: [{ fileName, fileSize, mimeType }]
-        const { files } = req.body;
-
-        // Validate karo ki files array empty nahi hai.
-        if (!Array.isArray(files) || files.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "No file metadata provided."
-            });
-        }
-
-        // Pehle confirm karo ki yeh shareId DB mein exist karta hai.
-        const share = await prisma.share.findUnique({
-            where: { id: shareId }
-        });
-
-        if (!share) {
-            return res.status(404).json({
-                success: false,
-                message: "Share not found."
-            });
-        }
-
-        // createMany — ek hi query mein saari files ka metadata insert karo.
-        // Yeh individual create() calls se zyada efficient hai.
-        await prisma.file.createMany({
-            data: files.map((f) => ({
-                fileName: f.fileName,
-                fileSize: f.fileSize,
-                mimeType: f.mimeType,
-                shareId           // Foreign key — is share se link karo
-            }))
-        });
-
-        // 201 Created — metadata successfully save ho gaya.
-        res.status(201).json({ success: true });
-
-    } catch (error) {
-
-        console.error("Save file metadata error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Failed to save file metadata."
-        });
+        const share = await prisma.share.findUnique({ where: { id: Number(req.params.shareId) }, include: { _count: { select: { files: true } } } });
+        if (!share) return res.status(404).json({ success: false, message: "Not found." });
+        res.json({ success: true, share: { id: share.id, status: share.status, remainingFiles: share._count.files } });
+    } catch (err) {
+        console.error("Status error:", err);
+        res.status(500).json({ success: false, message: "Status failed." });
     }
 });
 
+// ================================
+// DELETE /api/files/:fileId — delete-on-download (receiver consumes)
+// ================================
+router.delete("/files/:fileId", async (req, res) => {
+    try {
+        const ok = await deleteShareFile(req.params.fileId);
+        if (!ok) return res.status(404).json({ success: false, message: "File not found." });
+        res.json({ success: true });
+    } catch (err) {
+        console.error("File delete error:", err);
+        res.status(500).json({ success: false, message: "Delete failed." });
+    }
+});
 
-// Router export karo taaki server.js ise mount kar sake.
+// ================================
+// DELETE /api/shares/:shareId — full share cleanup
+// ================================
+router.delete("/:shareId", async (req, res) => {
+    try {
+        const share = await prisma.share.findUnique({ where: { id: Number(req.params.shareId) }, include: { files: true } });
+        if (!share) return res.status(404).json({ success: false, message: "Share not found." });
+        await deleteShareFiles(share.id);
+        await prisma.share.delete({ where: { id: share.id } }).catch(() => {});
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Share delete error:", err);
+        res.status(500).json({ success: false, message: "Delete failed." });
+    }
+});
+
+// deleteShareFiles — cleanup.js wala (expired shares / full cleanup ke liye reuse).
+const { deleteShareFiles } = require("../lib/cleanup");
+
 module.exports = router;
