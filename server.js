@@ -171,6 +171,25 @@ io.on("connection", (socket) => {
 // Simple health check route — confirm karta hai ki server chal raha hai.
 app.get("/", (req, res) => res.send("FileShare Backend Running"));
 
+// DB health check — confirm karta hai ki Neon PostgreSQL se connection chal raha hai.
+// Isse deployment ke baad diagnose karna easy ho jaata hai:
+//  - /           → server up/down
+//  - /api/health → server + database connection
+app.get("/api/health", async (req, res) => {
+    try {
+        await prisma.$queryRaw`SELECT 1`;
+        res.json({ status: "ok", db: "connected" });
+    } catch (error) {
+        console.error("Health check DB error:", error);
+        res.status(500).json({
+            status: "error",
+            db: "disconnected",
+            message: error.message,
+            code: error.code || null
+        });
+    }
+});
+
 
 // ================================
 // START SERVER
