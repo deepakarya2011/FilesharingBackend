@@ -81,7 +81,8 @@ router.post("/:shareId/upload", upload.array("files"), async (req, res) => {
         if (isExpired(share)) return res.status(410).json({ success: false, message: "Share expired." });
         if (!req.files || req.files.length === 0) return res.status(400).json({ success: false, message: "No files." });
 
-        const created = [];
+                const created = [];
+        const uploadErrors = [];
         for (const file of req.files) {
             try {
                 const { publicId, secureUrl } = await uploadToCloudinary(file.path, file.originalname);
@@ -91,13 +92,27 @@ router.post("/:shareId/upload", upload.array("files"), async (req, res) => {
                 created.push({ id: rec.id, fileName: rec.fileName, fileSize: rec.fileSize, url: rec.cloudinaryUrl });
             } catch (e) {
                 console.error("Upload failed for", file.originalname, e.message);
+                uploadErrors.push(`${file.originalname}: ${e.message}`);
             } finally {
-                fs.unlink(file.path, () => {}); // temp file hamesha delete karo
+                // TEMP file hamesha delete karo — disk fill se bachao.
+                fs.unlink(file.path, () => {});
             }
         }
 
+        // Agar koi bhi file Cloudinary pe nahi gayi → fail karo (silent failure se bachne ke liye).
+        // (Most common cause: CLOUDINARY_* env vars missing/wrong on Render.)
+        if (created.length === 0) {
+            return res.status(502).json({
+                success: false,
+                message: uploadErrors.length
+                    ? `Cloudinary upload failed: ${uploadErrors[0]}`
+                    : "Upload failed: no files were stored.",
+                errors: uploadErrors
+            });
+        }
+
         await prisma.share.update({ where: { id: share.id }, data: { status: "uploaded" } });
-        res.json({ success: true, files: created });
+        res.json({ success: true, files: created, errors: uploadErrors });
     } catch (err) {
         console.error("Upload route error:", err);
         res.status(500).json({ success: false, message: "Upload failed." });
