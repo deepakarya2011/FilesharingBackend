@@ -79,7 +79,16 @@ router.post("/:shareId/upload", upload.array("files"), async (req, res) => {
         const share = await prisma.share.findUnique({ where: { id: Number(req.params.shareId) } });
         if (!share) return res.status(404).json({ success: false, message: "Share not found." });
         if (isExpired(share)) return res.status(410).json({ success: false, message: "Share expired." });
-        if (!req.files || req.files.length === 0) return res.status(400).json({ success: false, message: "No files." });
+                if (!req.files || req.files.length === 0) return res.status(400).json({ success: false, message: "No files." });
+
+        // Cloudinary credentials must be set in the Render dashboard (Environment tab).
+        // Agar env vars missing ho to yahi se turant batao — taaki sender confuse na ho.
+        if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+            return res.status(502).json({
+                success: false,
+                message: "Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET in the Render dashboard (Environment) and redeploy."
+            });
+        }
 
                 const created = [];
         const uploadErrors = [];
@@ -113,9 +122,9 @@ router.post("/:shareId/upload", upload.array("files"), async (req, res) => {
 
         await prisma.share.update({ where: { id: share.id }, data: { status: "uploaded" } });
         res.json({ success: true, files: created, errors: uploadErrors });
-    } catch (err) {
+        } catch (err) {
         console.error("Upload route error:", err);
-        res.status(500).json({ success: false, message: "Upload failed." });
+        res.status(500).json({ success: false, message: err && err.message ? `Upload failed: ${err.message}` : "Upload failed." });
     }
 });
 
