@@ -8,6 +8,9 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const crypto = require("crypto");
+const https = require("https");
+const http = require("http");
+const archiver = require("archiver");
 const multer = require("multer");
 const Share = require("../models/Share");
 const File = require("../models/File");
@@ -30,6 +33,29 @@ const generateCode = () => crypto.randomInt(100000, 999999).toString();
 
 // Share expired check.
 const isExpired = (share) => new Date() > new Date(share.expiresAt);
+
+// Remote (Cloudinary) URL se binary stream kholta hai — redirects follow karta hai.
+// Ye readable Node stream return karta hai taaki `pipe`/`archiver` use kar saken.
+const streamRemoteFile = (url, maxRedirects = 3) =>
+    new Promise((resolve, reject) => {
+        const mod = url.startsWith("https:") ? https : http;
+        const req = mod.get(url, (res) => {
+            if ([301, 302, 303, 307, 308].includes(res.statusCode) && maxRedirects > 0 && res.headers.location) {
+                res.resume(); // old stream discard
+                return streamRemoteFile(new URL(res.headers.location, url).toString(), maxRedirects - 1)
+                    .then(resolve).catch(reject);
+            }
+            if (res.statusCode >= 400) {
+                res.resume();
+                return reject(new Error(`Remote fetch failed (HTTP ${res.statusCode})`));
+            }
+            resolve(res);
+        });
+        req.on("error", reject);
+    });
+
+// Safe filename — header ke liye special chars hatao.
+const sanitizeName = (name) => String(name || "file").replace(/[^\w.\- ]+/g, "_").slice(0, 120);
 
 // Upload one temp file to Cloudinary (folder: fileshare). resource_type "auto" = images/video/raw sab handle karta hai.
 const uploadToCloudinary = (filePath, originalName) =>
@@ -199,4 +225,92 @@ router.delete("/:shareId", async (req, res) => {
     }
 });
 
+// ================================
+// GET /api/shares/:shareId/download — one-click download
+//   • 1 file    → original format me direct download (original mime + filename)
+//   • multiple  → sab files ek hi ZIP me stream hoti hain
+//   • success pe files + share server se delete (delete-on-download)
+// ================================
+router.get("/:shareId/download", async (req, res) => {
+    let finishedOk = false;
+
+    try {
+        const share = await Share.findById(req.params.shareId);
+        if (!share) return res.status(404).json({ success: false, message: "Share not found." });
+        if (isExpired(share)) return res.status(410).json({ success: false, message: "Share expired." });
+
+        const files = await File.find({ shareId: share._id });
+        if (!files.length) return res.status(404).json({ success: false, message: "No files to download." });
+
+        // Response finish hone ke baad files/DB cleanup karo (sirf success pe).
+        const cleanupAfterSend = () => {
+            if (finishedOk) {
+                share.status = "completed";
+                Promise.all(files.map((f) => {
+                    if (f.cloudinaryPublicId) {
+                        return cloudinary.uploader.destroy(f.cloudinaryPublicId, { resource_type: "auto" })
+                            .catch((e) => console.warn("Cloudinary delete warning:", e.message));
+                    }
+                })).then(() => File.deleteMany({ shareId: share._id }))
+                    .then(() => share.save().catch(() => {}))
+                    .catch((e) => console.warn("Post-download cleanup warning:", e.message));
+            }
+        };
+
+        // -------- Single file: original format me direct download --------
+        if (files.length === 1) {
+            const f = files[0];
+            const stream = await streamRemoteFile(f.cloudinaryUrl);
+            const filename = sanitizeName(f.fileName);
+            res.status(200);
+            res.setHeader("Content-Type", f.mimeType || "application/octet-stream");
+            res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+            res.setHeader("Content-Length", String(f.fileSize || ""));
+
+            res.on("finish", () => { finishedOk = true; cleanupAfterSend(); });
+            stream.on("error", (e) => {
+                console.error("Download stream error:", e.message);
+                if (!res.headersSent) res.status(502).json({ success: false, message: "Download failed." });
+                res.destroy();
+            });
+            stream.pipe(res);
+            return;
+        }
+
+        // -------- Multiple files: sab ek hi ZIP me --------
+        const zip = archiver("zip", { zlib: { level: 6 } });
+        zip.on("error", (e) => {
+            console.error("Zip error:", e.message);
+            if (!res.headersSent) res.status(502).json({ success: false, message: "Zip failed." });
+            res.destroy();
+        });
+
+        const zipName = sanitizeName(`${share.code || "files"}.zip`);
+        res.status(200);
+        res.setHeader("Content-Type", "application/zip");
+        res.setHeader("Content-Disposition", `attachment; filename="${zipName}"`);
+
+        res.on("finish", () => { finishedOk = true; cleanupAfterSend(); });
+
+        // Har file ka remote stream kabhi memory me load nahi hota — seedha zaroor zip me daalte hain.
+        try {
+            for (const f of files) {
+                const stream = await streamRemoteFile(f.cloudinaryUrl);
+                zip.append(stream, { name: sanitizeName(f.fileName) });
+            }
+        } catch (e) {
+            console.error("Zip prep error:", e.message);
+            return res.status(502).json({ success: false, message: "Download preparation failed." });
+        }
+
+        zip.pipe(res);
+        await zip.finalize();
+    } catch (err) {
+        console.error("Download route error:", err);
+        if (!res.headersSent) res.status(500).json({ success: false, message: "Download failed." });
+    }
+});
+
+
+module.exports = router;
 module.exports = router;
