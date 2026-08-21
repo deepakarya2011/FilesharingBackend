@@ -15,7 +15,7 @@ const multer = require("multer");
 const Share = require("../models/Share");
 const File = require("../models/File");
 const cloudinary = require("../lib/cloudinary");
-const { deleteShareFiles } = require("../lib/cleanup");
+const { deleteFromCloudinary, deleteShareFiles } = require("../lib/cleanup");
 
 const router = express.Router();
 
@@ -63,7 +63,7 @@ const uploadToCloudinary = (filePath, originalName) =>
         cloudinary.uploader.upload(
             filePath,
             { folder: "fileshare", resource_type: "auto", use_filename: true, unique_filename: false, filename_override: originalName },
-            (error, result) => (error ? reject(error) : resolve({ publicId: result.public_id, secureUrl: result.secure_url }))
+            (error, result) => (error ? reject(error) : resolve({ publicId: result.public_id, secureUrl: result.secure_url, resourceType: result.resource_type || "image" }))
         );
     });
 
@@ -74,7 +74,7 @@ const deleteShareFile = async (fileId, shareId = null) => {
     const file = await File.findOne(query);
     if (!file) return false;
     if (file.cloudinaryPublicId) {
-        try { await cloudinary.uploader.destroy(file.cloudinaryPublicId, { resource_type: "auto" }); }
+        try { await deleteFromCloudinary(file); }
         catch (e) { console.warn("Cloudinary delete warning:", e.message); }
     }
     await File.findByIdAndDelete(file._id);
@@ -120,10 +120,10 @@ router.post("/:shareId/upload", upload.array("files"), async (req, res) => {
         const uploadErrors = [];
         for (const file of req.files) {
             try {
-                const { publicId, secureUrl } = await uploadToCloudinary(file.path, file.originalname);
+                const { publicId, secureUrl, resourceType } = await uploadToCloudinary(file.path, file.originalname);
                 const rec = await File.create({
                     fileName: file.originalname, fileSize: file.size, mimeType: file.mimetype,
-                    cloudinaryPublicId: publicId, cloudinaryUrl: secureUrl, shareId: share._id
+                    cloudinaryPublicId: publicId, cloudinaryUrl: secureUrl, resourceType, shareId: share._id
                 });
                 created.push({ id: String(rec._id), fileName: rec.fileName, fileSize: rec.fileSize, url: rec.cloudinaryUrl });
             } catch (e) {
@@ -248,7 +248,7 @@ router.get("/:shareId/download", async (req, res) => {
                 share.status = "completed";
                 Promise.all(files.map((f) => {
                     if (f.cloudinaryPublicId) {
-                        return cloudinary.uploader.destroy(f.cloudinaryPublicId, { resource_type: "auto" })
+                        return deleteFromCloudinary(f)
                             .catch((e) => console.warn("Cloudinary delete warning:", e.message));
                     }
                 })).then(() => File.deleteMany({ shareId: share._id }))
@@ -312,5 +312,4 @@ router.get("/:shareId/download", async (req, res) => {
 });
 
 
-module.exports = router;
 module.exports = router;

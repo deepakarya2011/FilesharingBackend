@@ -15,6 +15,10 @@ const fileSchema = new mongoose.Schema({
     // Cloudinary ka public ID — file delete karne ke liye chahiye.
     cloudinaryPublicId: { type: String, default: null },
 
+    // Cloudinary resource_type (image|video|raw) — delete ke waqt same type chahiye,
+    // warna "auto" upload ki files destroy se miss ho jaati hain aur storage mein reh jaati hain.
+    resourceType: { type: String, default: "image" },
+
     // Cloudinary secure URL — receiver download karne ke liye.
     cloudinaryUrl: { type: String, default: null },
 
