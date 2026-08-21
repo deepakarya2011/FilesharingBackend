@@ -1,6 +1,7 @@
 // Share routes — Cloudinary-based file transfer.
 // WebRTC/P2P removed: files backend se Cloudinary pe upload hote hain,
 // receiver download karta hai, aur download hone ke BAAD file turant delete hoti hai.
+// DB: MongoDB (Mongoose) — Prisma/PG/Neon removed.
 
 const express = require("express");
 const path = require("path");
@@ -8,8 +9,10 @@ const fs = require("fs");
 const os = require("os");
 const crypto = require("crypto");
 const multer = require("multer");
-const prisma = require("../lib/prisma");
+const Share = require("../models/Share");
+const File = require("../models/File");
 const cloudinary = require("../lib/cloudinary");
+const { deleteShareFiles } = require("../lib/cleanup");
 
 const router = express.Router();
 
@@ -40,34 +43,31 @@ const uploadToCloudinary = (filePath, originalName) =>
 
 // Delete ek file ko Cloudinary + DB dono se. Agar last file ho to share "completed".
 const deleteShareFile = async (fileId, shareId = null) => {
-    const where = { id: Number(fileId) };
-    if (shareId != null) where.shareId = shareId;
-    const file = await prisma.file.findFirst({ where });
+    const query = { _id: fileId };
+    if (shareId != null) query.shareId = shareId;
+    const file = await File.findOne(query);
     if (!file) return false;
     if (file.cloudinaryPublicId) {
         try { await cloudinary.uploader.destroy(file.cloudinaryPublicId, { resource_type: "auto" }); }
         catch (e) { console.warn("Cloudinary delete warning:", e.message); }
     }
-    await prisma.file.delete({ where: { id: file.id } });
-    const remaining = await prisma.file.count({ where: { shareId: file.shareId } });
+    await File.findByIdAndDelete(file._id);
+    const remaining = await File.countDocuments({ shareId: file.shareId });
     if (remaining === 0) {
-        await prisma.share.update({ where: { id: file.shareId }, data: { status: "completed" } }).catch(() => {});
+        await Share.updateOne({ _id: file.shareId }, { status: "completed" }).catch(() => {});
     }
     return true;
 };
-
 // ================================
 // POST /api/shares — create share
 // ================================
 router.post("/", async (req, res) => {
     try {
-        const share = await prisma.share.create({
-            data: { code: generateCode(), expiresAt: new Date(Date.now() + 60 * 60 * 1000) } // 1 hour
-        });
-        res.status(201).json({ success: true, share: { id: share.id, code: share.code, expiresAt: share.expiresAt } });
+        const share = await Share.create({ code: generateCode(), expiresAt: new Date(Date.now() + 60 * 60 * 1000) }); // 1 hour
+        res.status(201).json({ success: true, share: { id: String(share._id), code: share.code, expiresAt: share.expiresAt } });
     } catch (error) {
         console.error("Create share error:", error);
-                res.status(500).json({ success: false, message: "Failed to create share." });
+        res.status(500).json({ success: false, message: "Failed to create share." });
     }
 });
 
@@ -76,10 +76,10 @@ router.post("/", async (req, res) => {
 // ================================
 router.post("/:shareId/upload", upload.array("files"), async (req, res) => {
     try {
-        const share = await prisma.share.findUnique({ where: { id: Number(req.params.shareId) } });
+        const share = await Share.findById(req.params.shareId);
         if (!share) return res.status(404).json({ success: false, message: "Share not found." });
         if (isExpired(share)) return res.status(410).json({ success: false, message: "Share expired." });
-                if (!req.files || req.files.length === 0) return res.status(400).json({ success: false, message: "No files." });
+        if (!req.files || req.files.length === 0) return res.status(400).json({ success: false, message: "No files." });
 
         // Cloudinary credentials must be set in the Render dashboard (Environment tab).
         // Agar env vars missing ho to yahi se turant batao — taaki sender confuse na ho.
@@ -90,15 +90,16 @@ router.post("/:shareId/upload", upload.array("files"), async (req, res) => {
             });
         }
 
-                const created = [];
+        const created = [];
         const uploadErrors = [];
         for (const file of req.files) {
             try {
                 const { publicId, secureUrl } = await uploadToCloudinary(file.path, file.originalname);
-                const rec = await prisma.file.create({
-                    data: { fileName: file.originalname, fileSize: file.size, mimeType: file.mimetype, cloudinaryPublicId: publicId, cloudinaryUrl: secureUrl, shareId: share.id }
+                const rec = await File.create({
+                    fileName: file.originalname, fileSize: file.size, mimeType: file.mimetype,
+                    cloudinaryPublicId: publicId, cloudinaryUrl: secureUrl, shareId: share._id
                 });
-                created.push({ id: rec.id, fileName: rec.fileName, fileSize: rec.fileSize, url: rec.cloudinaryUrl });
+                created.push({ id: String(rec._id), fileName: rec.fileName, fileSize: rec.fileSize, url: rec.cloudinaryUrl });
             } catch (e) {
                 console.error("Upload failed for", file.originalname, e.message);
                 uploadErrors.push(`${file.originalname}: ${e.message}`);
@@ -120,31 +121,31 @@ router.post("/:shareId/upload", upload.array("files"), async (req, res) => {
             });
         }
 
-        await prisma.share.update({ where: { id: share.id }, data: { status: "uploaded" } });
+        await Share.updateOne({ _id: share._id }, { status: "uploaded" });
         res.json({ success: true, files: created, errors: uploadErrors });
-        } catch (err) {
+    } catch (err) {
         console.error("Upload route error:", err);
         res.status(500).json({ success: false, message: err && err.message ? `Upload failed: ${err.message}` : "Upload failed." });
     }
 });
-
 // ================================
 // GET /api/shares/verify/:code — receiver code verify
 // ================================
 router.get("/verify/:code", async (req, res) => {
     try {
-        const share = await prisma.share.findUnique({ where: { code: req.params.code }, include: { files: true } });
+        const share = await Share.findOne({ code: req.params.code });
         if (!share) return res.status(404).json({ success: false, message: "Invalid code." });
         if (isExpired(share)) {
-            await deleteShareFiles(share.id);
-            await prisma.share.delete({ where: { id: share.id } }).catch(() => {});
+            await deleteShareFiles(share._id);
+            await Share.findByIdAndDelete(share._id).catch(() => {});
             return res.status(410).json({ success: false, message: "Share expired." });
         }
+        const files = await File.find({ shareId: share._id });
         res.json({
             success: true,
             share: {
-                id: share.id, code: share.code, expiresAt: share.expiresAt, status: share.status,
-                files: share.files.map((f) => ({ id: f.id, fileName: f.fileName, fileSize: f.fileSize, url: f.cloudinaryUrl }))
+                id: String(share._id), code: share.code, expiresAt: share.expiresAt, status: share.status,
+                files: files.map((f) => ({ id: String(f._id), fileName: f.fileName, fileSize: f.fileSize, url: f.cloudinaryUrl }))
             }
         });
     } catch (err) {
@@ -158,9 +159,10 @@ router.get("/verify/:code", async (req, res) => {
 // ================================
 router.get("/:shareId/status", async (req, res) => {
     try {
-        const share = await prisma.share.findUnique({ where: { id: Number(req.params.shareId) }, include: { _count: { select: { files: true } } } });
+        const share = await Share.findById(req.params.shareId);
         if (!share) return res.status(404).json({ success: false, message: "Not found." });
-        res.json({ success: true, share: { id: share.id, status: share.status, remainingFiles: share._count.files } });
+        const remainingFiles = await File.countDocuments({ shareId: share._id });
+        res.json({ success: true, share: { id: String(share._id), status: share.status, remainingFiles } });
     } catch (err) {
         console.error("Status error:", err);
         res.status(500).json({ success: false, message: "Status failed." });
@@ -186,18 +188,15 @@ router.delete("/files/:fileId", async (req, res) => {
 // ================================
 router.delete("/:shareId", async (req, res) => {
     try {
-        const share = await prisma.share.findUnique({ where: { id: Number(req.params.shareId) }, include: { files: true } });
+        const share = await Share.findById(req.params.shareId);
         if (!share) return res.status(404).json({ success: false, message: "Share not found." });
-        await deleteShareFiles(share.id);
-        await prisma.share.delete({ where: { id: share.id } }).catch(() => {});
+        await deleteShareFiles(share._id);
+        await Share.findByIdAndDelete(share._id).catch(() => {});
         res.json({ success: true });
     } catch (err) {
         console.error("Share delete error:", err);
         res.status(500).json({ success: false, message: "Delete failed." });
     }
 });
-
-// deleteShareFiles — cleanup.js wala (expired shares / full cleanup ke liye reuse).
-const { deleteShareFiles } = require("../lib/cleanup");
 
 module.exports = router;

@@ -3,11 +3,11 @@ services:
     name: fileshare-backend
     runtime: node
     buildCommand: npm install && npm run build
-    startCommand: npx prisma db push && npm start
+    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
-      - key: DATABASE_URL
+      - key: MONGODB_URI
         sync: false
       - key: FRONTEND_URL
         sync: false

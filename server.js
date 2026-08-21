@@ -1,9 +1,10 @@
 // server.js — Express API backend (Cloudinary-based file transfer).
+// DB: MongoDB (Mongoose) — Prisma/PG/Neon removed.
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const dotenv = require("dotenv");
-const prisma = require("./lib/prisma");
+const { connectDB, isDBConnected } = require("./lib/db");
 const { cleanupExpiredShares } = require("./lib/cleanup");
 
 dotenv.config();
@@ -30,8 +31,7 @@ app.use("/api/shares", require("./routes/shareRoutes"));
 // Health check (DB connectivity included)
 app.get("/api/health", async (_req, res) => {
     try {
-        await prisma.$queryRaw`SELECT 1`;
-        res.json({ status: "ok", database: "connected" });
+        res.json({ status: "ok", database: isDBConnected() ? "connected" : "disconnected" });
     } catch (e) {
         res.status(500).json({ status: "error", database: e.message });
     }
@@ -51,7 +51,16 @@ setInterval(() => {
         .catch((e) => console.warn("Cleanup error:", e.message));
 }, 15 * 60 * 1000);
 
-const server = http.createServer(app);
-server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+// MongoDB connect hone ke baad hi server start karo.
+const startServer = async () => {
+    await connectDB();
+    const server = http.createServer(app);
+    server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+};
+
+startServer().catch((e) => {
+    console.error("Startup failed — MongoDB connect nahi ho paya:", e.message);
+    process.exit(1);
+});
 
 module.exports = app;

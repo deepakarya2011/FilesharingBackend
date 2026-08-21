@@ -1,19 +1,16 @@
 {
     "scripts": {
         "dev": "nodemon server.js",
-        "build": "prisma generate",
+        "build": "node -e \"console.log('Build OK — MongoDB + Mongoose, no compile step needed')\"",
         "start": "node server.js"
     },
     "dependencies": {
-        "@prisma/adapter-pg": "^7.9.1",
-        "@prisma/client": "^7.9.1",
         "cloudinary": "^2.5.1",
         "cors": "^2.8.6",
         "dotenv": "^17.4.2",
         "express": "^5.2.1",
+        "mongoose": "^8.0.0",
         "multer": "^1.4.5-lts.1",
-        "pg": "^8.23.0",
-        "prisma": "^7.9.1",
         "socket.io": "^4.8.1"
     },
     "devDependencies": {

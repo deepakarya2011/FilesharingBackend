@@ -4,9 +4,8 @@ The backend auto-deploys from the `main` branch of `https://github.com/deepakary
 via the `render.yaml` in this repo. Each push to `main` triggers a new Render deploy.
 
 ## Build / Start (defined in `render.yaml`)
-- **buildCommand:** `npm install && npm run build && npx prisma db push`
-  - `npm run build` → `prisma generate` (generates the Prisma client into `generated/prisma`).
-  - `npx prisma db push` syncs `prisma/schema.prisma` to the Neon PostgreSQL database.
+- **buildCommand:** `npm install && npm run build`
+  - `npm run build` is a lightweight no-op check — MongoDB + Mongoose ko koi generate/compile step nahi chahiye.
 - **startCommand:** `npm start` → `node server.js` (listens on the `$PORT` Render injects).
 - **runtime:** node
 
@@ -15,7 +14,7 @@ Render reads these from `render.yaml` (`sync: false` = set manually in the dashb
 
 | Variable | Value | Notes |
 |---|---|---|
-| `DATABASE_URL` | Neon PostgreSQL connection string | e.g. `postgresql://...neon.tech/dbname?sslmode=require` |
+| `MONGODB_URI` | MongoDB connection string | e.g. `mongodb+srv://...mongodb.net/filesharing` |
 | `FRONTEND_URL` | Your Vercel frontend URL | e.g. `https://filesharing-frontend.vercel.app` (CORS allow-list) |
 | `CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name | |
 | `CLOUDINARY_API_KEY` | Cloudinary API key | |
@@ -43,9 +42,7 @@ Render reads these from `render.yaml` (`sync: false` = set manually in the dashb
 
 ## Local dev
 ```
-cp .env.example .env      # fill DATABASE_URL + CLOUDINARY_*
+cp .env.example .env      # fill MONGODB_URI + CLOUDINARY_*
 npm install
-npx prisma generate
-npx prisma db push        # or: npx prisma migrate dev (local migrations)
 npm run dev               # nodemon server.js on http://localhost:5000
 ```
